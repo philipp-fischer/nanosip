@@ -1,0 +1,6 @@
+/.idea
+/.vscode
+/build
+/dist
+__pycache__
+/examples/phil.py
