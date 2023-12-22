@@ -6,7 +6,7 @@
 <br />
 <div align="center">
   <a href="https://github.com/philipp-fischer/nanosip">
-    <img src="images/logo.png" alt="Logo" width="128" height="128">
+    <img src="https://raw.githubusercontent.com/philipp-fischer/nanosip/main/images/logo.png" alt="Logo" width="128" height="128">
   </a>
 
 <h3 align="center">nanosip</h3>
