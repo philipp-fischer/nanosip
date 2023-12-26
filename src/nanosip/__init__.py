@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import logging
 import os
 import random
 import re
@@ -314,7 +313,6 @@ class TransactionProcessor:
         def datagram_received(self, data, addr):
             """Handle any response we receive."""
 
-            logging.debug("Received: %s", data.decode())
             self.transaction.handle_response(data.decode())
 
             self.maybe_send_new_requests()
@@ -322,14 +320,12 @@ class TransactionProcessor:
         def error_received(self, exc):
             """Close the connection if we receive an error."""
 
-            logging.error("Error received: %s", exc)
             if self.transport:
                 self.transport.close()
 
         def connection_lost(self, exc):
             """If the connection is lost, let the outer loop know about it."""
 
-            logging.error("Connection lost")
             self.on_con_lost.set_result(True)
 
     def __init__(self, transaction: Transaction) -> None:
