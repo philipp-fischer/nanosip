@@ -8,7 +8,11 @@ import re
 import string
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Any, NamedTuple, Optional, Union
+from typing import Any, NamedTuple, Optional, Union, List
+
+
+class SIPError(Exception):
+    """Raised when some SIP-protocol related error happens."""
 
 
 class SIPAuthCreds(NamedTuple):
@@ -24,7 +28,7 @@ class Transaction(ABC):
     A SIP transaction consists of a single request and any responses to
     that request, which include zero or more provisional responses and
     one or more final responses. (rfc3261#section-17).
-    Note: If request needs to be repeated for Authorization, this will
+    Note: If a request needs to be repeated for Authorization, this will
     also be handled by the same Transaction.
     """
 
@@ -32,10 +36,10 @@ class Transaction(ABC):
     pending_requests: list[Union[str, Any]]
     realm: Optional[str]
     nonce: Optional[str]
-    result: Optional[tuple[int, str]]
+    errors: List[str]
 
     class TerminationMarker:
-        """Used as a pseudeo request to mark the end of a transaction.
+        """Used as a pseudo request to mark the end of a transaction.
 
         Note that we use the class, not an instance of it.
         """
@@ -59,7 +63,7 @@ class Transaction(ABC):
         self.branch = self._generate_branch()
         self.call_id = self._generate_call_id()
         self.tag = self._generate_tag()
-        self.result = None  # To be set when receiving response
+        self.errors = []
 
         self.pending_requests = []
         self.auth_creds = auth_creds
@@ -67,6 +71,8 @@ class Transaction(ABC):
         self.nonce = None
 
         self.req_pending = None
+
+        self.remaining_auth_tries = 2  # Try authorization at most 2 times.
 
     @abstractmethod
     def method(self) -> str:
@@ -89,8 +95,15 @@ class Transaction(ABC):
     def handle_response(self, resp: str):
         """Upon receiving a new response, handle it."""
 
-        status, header_vals = self._parse_response_status(resp)
+        status, reason, header_vals = self._parse_response_status(resp)
         if status == 401 or status == 407:  # Unauthorized
+            if self.remaining_auth_tries <= 0:
+                self.pending_requests.append(self.TerminationMarker)
+                self.errors.append(f"{status} Unauthorized")
+                raise SIPError
+
+            self.remaining_auth_tries -= 1
+
             if status == 401:
                 auth_header = header_vals["WWW-Authenticate"]
             else:
@@ -127,16 +140,23 @@ class Transaction(ABC):
                 )
             )
 
-            self.result = (status, auth_header)
         elif status == 487:  # Request cancelled
             # Add ACK
             self.pending_requests.append(self._generate_headers(["Content-Length: 0"], method="ACK") + "\r\n\r\n")
+            # We don't store an error here, since we want to cancel the request
         elif status == 200:
             # OK
             pass
         elif status == 100:
             # Trying
             pass
+        elif 180 <= status <= 183:
+            # Ringing, Forwarded, Queued, Session Progress
+            pass
+        else:
+            # Some other failure (e.g. BUSY, bad request, etc.)
+            self.errors.append(f"{status} {reason}")
+            raise SIPError
 
     def _generate_branch(self, length=32) -> str:
         branchid = "".join(random.choices(string.hexdigits, k=length - 7))
@@ -172,7 +192,7 @@ class Transaction(ABC):
                 f"CSeq: {self.cseq} {cseq_method}",
                 f"Call-ID: {self.call_id}",
                 "Max-Forwards: 70",
-                "User-Agent: TinySIP/0.1",
+                "User-Agent: NanoSIP/0.1",
             ]
             + additional_headers
         )
@@ -190,7 +210,7 @@ class Transaction(ABC):
             key, val = l_cont.split(":", maxsplit=1)
             header_vals[key] = val
 
-        return int(status_code), header_vals
+        return int(status_code), reason, header_vals
 
     def _generate_authorization(self, creds: SIPAuthCreds, realm: str, nonce: str) -> str:
         ha1 = hashlib.md5((creds.username + ":" + realm + ":" + creds.password).encode("utf8")).hexdigest()
@@ -224,7 +244,7 @@ class Invite(Transaction):
         return self._generate_headers(["Content-Length: 0"] + additional_headers) + "\r\n\r\n"
 
     def cancel(self):
-        """Cnacel this INVITE."""
+        """Cancel this INVITE."""
 
         self.pending_requests.append(
             self._generate_headers(["Content-Length: 0"], method="CANCEL", cseq_method="CANCEL") + "\r\n\r\n"
@@ -272,9 +292,10 @@ class Register(Transaction):
 
 
 class TransactionProcessor:
-    """Create the transaction and the connection needed for a transaction.
+    """Processes a given transaction and manages the connection needed for that transaction.
 
     Passes UDP messages in and out.
+    The run method returns a list of error strings. If the list is empty, everything is ok.
     """
 
     transport: Optional[asyncio.DatagramTransport]
@@ -282,16 +303,19 @@ class TransactionProcessor:
     class UDPProtocol(asyncio.DatagramProtocol):
         """Manage the UDP connection and handle incoming messages."""
 
-        def __init__(self, transaction: Transaction, on_con_lost) -> None:
+        def __init__(self, transaction: Transaction, done_future) -> None:
             """Construct the UDPProtocol object."""
 
             self.transaction = transaction
             self.transaction.check_func = self.maybe_send_new_requests
-            self.on_con_lost = on_con_lost
+            self.done_future = done_future
             self.transport = None
 
         def maybe_send_new_requests(self):
             """Send messages as long as our transaction object has new messages to send."""
+
+            if self.done_future.done():
+                return
 
             assert self.transport, "Need to make a connection before sending or receiving SIP datagrams."
             while True:
@@ -312,10 +336,19 @@ class TransactionProcessor:
 
         def datagram_received(self, data, addr):
             """Handle any response we receive."""
+            print("Received: ")
+            print(data.decode())
 
-            self.transaction.handle_response(data.decode())
+            try:
+                self.transaction.handle_response(data.decode())
+            except SIPError:
+                if self.transport:
+                    self.transport.close()
+                    self.transport = None
+                    self.done_future.set_result(True)
 
-            self.maybe_send_new_requests()
+            if self.transport:
+                self.maybe_send_new_requests()
 
         def error_received(self, exc):
             """Close the connection if we receive an error."""
@@ -323,15 +356,20 @@ class TransactionProcessor:
             if self.transport:
                 self.transport.close()
 
+            if not self.done_future.done():
+                self.done_future.set_exception(exc)
+
         def connection_lost(self, exc):
             """If the connection is lost, let the outer loop know about it."""
 
-            self.on_con_lost.set_result(True)
+            if not self.done_future.done():
+                self.done_future.set_result(True)
 
     def __init__(self, transaction: Transaction) -> None:
         """Construct the TransactionProcessor."""
 
         self.transaction = transaction
+        self.errors = []
 
     def _extract_ip(self, uri: str):
         if "@" in uri:
@@ -343,19 +381,25 @@ class TransactionProcessor:
         """Start the main loop of the transaction processor."""
 
         loop = asyncio.get_running_loop()
-        on_con_lost = loop.create_future()
+        done_future = loop.create_future()
 
         transport, protocol = await loop.create_datagram_endpoint(
-            lambda: self.UDPProtocol(self.transaction, on_con_lost),
+            lambda: self.UDPProtocol(self.transaction, done_future),
             remote_addr=(self._extract_ip(self.transaction.uri_to), 5060),
         )
 
+        udp_errors = []
+
         try:
-            await on_con_lost
+            await done_future
+        except OSError as e:
+            # We will catch UDP Protocol related errors here.
+            udp_errors = [str(e)]
         finally:
             transport.close()
 
-        return self.transaction.result
+        # Errors related to SIP, are stored by the Transaction object, we add them here.
+        return udp_errors + self.transaction.errors
 
 
 async def async_call_and_cancel(inv: Invite, duration: int):
@@ -371,7 +415,9 @@ async def async_call_and_cancel(inv: Invite, duration: int):
         await asyncio.sleep(duration)
         inv.cancel()
 
-    await asyncio.gather(tp.run(), cancel_call(inv))
+    tp_ret, _ = await asyncio.gather(tp.run(), cancel_call(inv))
+    if len(tp_ret) > 0:
+        raise IOError("nanosip error: " + "; ".join(tp_ret))
 
 
 def call_and_cancel(inv: Invite, duration: int):
