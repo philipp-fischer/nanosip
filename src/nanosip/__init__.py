@@ -336,8 +336,6 @@ class TransactionProcessor:
 
         def datagram_received(self, data, addr):
             """Handle any response we receive."""
-            print("Received: ")
-            print(data.decode())
 
             try:
                 self.transaction.handle_response(data.decode())
