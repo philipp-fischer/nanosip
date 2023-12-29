@@ -99,6 +99,9 @@ call_and_cancel(inv, 15)
 
 This package also supports use with `asyncio`. For more examples, check out the `examples/` subfolder.
 
+The `call_and_cancel` method may throw an `OSError` if something with the connection of the SIP call went wrong.
+For example, if the credentials are wrong, it will throw an `OSError('nanosip error: 407 Unauthorized')`.
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 

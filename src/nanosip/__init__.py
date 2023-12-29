@@ -385,7 +385,7 @@ class TransactionProcessor:
 
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: self.UDPProtocol(self.transaction, done_future),
-            remote_addr=(self._extract_ip(self.transaction.uri_to), 5060),
+            remote_addr=(self._extract_ip(self.transaction.uri_from), 5060),
         )
 
         udp_errors = []
@@ -417,7 +417,7 @@ async def async_call_and_cancel(inv: Invite, duration: int):
 
     tp_ret, _ = await asyncio.gather(tp.run(), cancel_call(inv))
     if len(tp_ret) > 0:
-        raise IOError("nanosip error: " + "; ".join(tp_ret))
+        raise OSError("nanosip error: " + "; ".join(tp_ret))
 
 
 def call_and_cancel(inv: Invite, duration: int):
