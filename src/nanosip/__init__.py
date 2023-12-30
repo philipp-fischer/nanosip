@@ -303,7 +303,7 @@ class TransactionProcessor:
     class UDPProtocol(asyncio.DatagramProtocol):
         """Manage the UDP connection and handle incoming messages."""
 
-        def __init__(self, transaction: Transaction, done_future) -> None:
+        def __init__(self, transaction: Transaction, done_future: asyncio.Future) -> None:
             """Construct the UDPProtocol object."""
 
             self.transaction = transaction
@@ -324,6 +324,8 @@ class TransactionProcessor:
                     self.transport.sendto(next_req.encode())
                 elif next_req is Transaction.TerminationMarker:
                     self.transport.close()
+                    self.transport = None
+                    self.done_future.set_result(True)
                     break
                 else:
                     break
@@ -363,10 +365,11 @@ class TransactionProcessor:
             if not self.done_future.done():
                 self.done_future.set_result(True)
 
-    def __init__(self, transaction: Transaction) -> None:
+    def __init__(self, transaction: Transaction, sip_server: Optional[str] = None) -> None:
         """Construct the TransactionProcessor."""
 
         self.transaction = transaction
+        self.sip_server = sip_server
         self.errors = []
 
     def _extract_ip(self, uri: str):
@@ -380,10 +383,14 @@ class TransactionProcessor:
 
         loop = asyncio.get_running_loop()
         done_future = loop.create_future()
+        sip_server = self.sip_server
 
+        if sip_server is None:
+            # If no sip server is given, we take the domain of the FROM-URI
+            sip_server = self._extract_ip(self.transaction.uri_from)
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: self.UDPProtocol(self.transaction, done_future),
-            remote_addr=(self._extract_ip(self.transaction.uri_from), 5060),
+            remote_addr=(sip_server, 5060),
         )
 
         udp_errors = []
@@ -400,29 +407,41 @@ class TransactionProcessor:
         return udp_errors + self.transaction.errors
 
 
-async def async_call_and_cancel(inv: Invite, duration: int):
+async def async_call_and_cancel(inv: Invite, duration: int, sip_server: Optional[str] = None):
     """Make a call and cancel it after `duration` seconds.
 
     Note that this simple SIP implementation is not capable of establishing
     an actual audio connection. It just rings the other phone.
     """
 
-    tp = TransactionProcessor(inv)
+    tp = TransactionProcessor(inv, sip_server=sip_server)
 
     async def cancel_call(inv):
         await asyncio.sleep(duration)
         inv.cancel()
 
-    tp_ret, _ = await asyncio.gather(tp.run(), cancel_call(inv))
+    tp_task = asyncio.create_task(tp.run())
+    cancel_task = asyncio.create_task(cancel_call(inv))
+
+    try:
+        tp_ret = await asyncio.wait_for(tp_task, duration+1)
+    except asyncio.TimeoutError:
+        print("Hit Iimeout")
+        cancel_task.cancel()
+        return
+
+    cancel_task.cancel()
+
+    # tp_ret, _ = await asyncio.gather(tp.run(), cancel_call(inv))
     if len(tp_ret) > 0:
         raise OSError("nanosip error: " + "; ".join(tp_ret))
 
 
-def call_and_cancel(inv: Invite, duration: int):
+def call_and_cancel(inv: Invite, duration: int, sip_server: Optional[str] = None):
     """Make a call and cancel it after `duration` seconds.
 
     Note that this simple SIP implementation is not capable of establishing
     an actual audio connection. It just rings the other phone.
     """
 
-    return asyncio.run(async_call_and_cancel(inv, duration))
+    return asyncio.run(async_call_and_cancel(inv, duration, sip_server))

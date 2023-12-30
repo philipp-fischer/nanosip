@@ -94,7 +94,7 @@ inv = Invite(
     auth_creds=auth_creds,
 )
 
-call_and_cancel(inv, 15)
+call_and_cancel(inv, 15, "SIP_SERVER")
 ```
 
 This package also supports use with `asyncio`. For more examples, check out the `examples/` subfolder.
